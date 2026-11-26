@@ -97,10 +97,9 @@ def parse_cookie_header(header: CookieHeader) -> Dict[str, List[str]]:
                 raise CookieError("invalid cookie name")
             quoted = len(value) >= 2 and value[0] == '"' and value[-1] == '"'
             if quoted:
-                value = value[1:-1]
-            elif '"' in value:
-                raise CookieError("invalid cookie value")
-            if not _valid_cookie_value(value):
+                if not _valid_cookie_value(value[1:-1]):
+                    raise CookieError("invalid cookie value")
+            elif '"' in value or not _valid_cookie_value(value):
                 raise CookieError("invalid cookie value")
             result.setdefault(name, []).append(value)
     return result
@@ -189,7 +188,10 @@ def format_cookie(
         if not isinstance(domain, str) or not _valid_domain(domain):
             raise CookieError("invalid cookie domain")
         domain = domain.lower().lstrip(".")
-    if name.startswith("__Host-"):
+    prefix_name = name.lower()
+    if prefix_name.startswith("__secure-") and not secure:
+        raise CookieError("__Secure- cookies must be Secure")
+    if prefix_name.startswith("__host-"):
         if domain is not None:
             raise CookieError("__Host- cookies must not set Domain")
         if path != "/":

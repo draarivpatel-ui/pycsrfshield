@@ -237,6 +237,10 @@ class ExpiryTests(unittest.TestCase):
         with self.assertRaises(TokenError):
             manager().issue(SESSION, now=-1)
 
+    def test_negative_fractional_now_issue_rejected(self):
+        with self.assertRaises(TokenError):
+            manager().issue(SESSION, now=-0.5)
+
 
 class RotationTests(unittest.TestCase):
     def test_fallback_key_verifies(self):

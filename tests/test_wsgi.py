@@ -35,14 +35,14 @@ def shield(**kwargs):
 
 def good_request(m=None, **extra):
     m = m or manager()
-    token = m.mint("session-42")
+    cookie_token, transport_token = m.issue_pair("session-42")
     headers = {"Origin": ORIGIN}
     headers.update(extra.pop("headers", {}))
     return wsgi_environ(
         "POST",
-        cookies="%s=%s" % (COOKIE, token),
+        cookies="%s=%s" % (COOKIE, cookie_token),
         headers=headers,
-        body=("X-CSRF-Token=" + quote(token)).encode(),
+        body=("X-CSRF-Token=" + quote(transport_token)).encode(),
         **extra,
     )
 
@@ -63,9 +63,9 @@ class WSGIHappyPathTests(unittest.TestCase):
             return [b"ok"]
 
         mw = PyCSRFShieldWSGI(capturing_app, manager(), expected_origin=ORIGIN, session_id="session-42", allow_missing_referer=True)
-        token = mw.core.tokens.mint("session-42")
-        body = ("X-CSRF-Token=" + quote(token)).encode()
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN}, body=body)
+        cookie_token, transport_token = mw.core.tokens.issue_pair("session-42")
+        body = ("X-CSRF-Token=" + quote(transport_token)).encode()
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN}, body=body)
         collect(mw, env, StartResponse())
         self.assertEqual(captured[0], body)
 
@@ -106,16 +106,16 @@ class WSGIHappyPathTests(unittest.TestCase):
     def test_form_body_token_accepted(self):
         start = StartResponse()
         m = manager()
-        token = m.mint("session-42")
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN}, body=("csrf_token=" + quote(token)).encode())
+        cookie_token, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN}, body=("csrf_token=" + quote(transport_token)).encode())
         collect(shield(), env, start)
         self.assertEqual(start.status, "200 OK")
 
     def test_custom_header_name(self):
         start = StartResponse()
         m = manager()
-        token = m.mint("session-42")
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-Token": token})
+        cookie_token, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-Token": transport_token})
         mw = PyCSRFShieldWSGI(app, manager(), expected_origin=ORIGIN, session_id="session-42", header_name="X-Token", allow_missing_referer=True)
         collect(mw, env, start)
         self.assertEqual(start.status, "200 OK")
@@ -123,8 +123,8 @@ class WSGIHappyPathTests(unittest.TestCase):
     def test_custom_cookie_name(self):
         start = StartResponse()
         m = manager()
-        token = m.mint("session-42")
-        env = wsgi_environ("POST", cookies="csrf=%s" % token, headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="csrf=%s" % cookie_token, headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         mw = PyCSRFShieldWSGI(app, manager(), expected_origin=ORIGIN, session_id="session-42", cookie_name="csrf", allow_missing_referer=True)
         collect(mw, env, start)
         self.assertEqual(start.status, "200 OK")
@@ -157,29 +157,33 @@ class WSGIRejectionTests(unittest.TestCase):
 
     def test_duplicate_cookie_denied(self):
         m = manager()
-        token = m.mint("session-42")
-        env = wsgi_environ("POST", cookies="%s=%s; %s=tossed" % (COOKIE, token, COOKIE), headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="%s=%s; %s=tossed" % (COOKIE, cookie_token, COOKIE), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(env)
 
     def test_mismatched_token_denied(self):
         m = manager()
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, m.mint("session-42")), headers={"Origin": ORIGIN, "X-CSRF-Token": m.mint("session-42")})
+        cookie_token, _ = m.issue_pair("session-42")
+        _, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(env)
 
     def test_forged_token_denied(self):
         m = manager()
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, m.mint("session-42")), headers={"Origin": ORIGIN, "X-CSRF-Token": "forged"})
+        cookie_token, _ = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": "forged"})
         self.assert_denied(env)
 
     def test_expired_token_denied(self):
         m = manager(ttl=10, clock_skew=0)
-        token = m.mint("session-42", now=1000)
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = m.issue_pair("session-42", now=1000)
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(env)
 
     def test_wrong_session_denied(self):
         m = manager()
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, m.mint("other")), headers={"Origin": ORIGIN, "X-CSRF-Token": m.mint("other")})
+        cookie_token, transport_token = m.issue_pair("other")
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(env)
 
     def test_cross_site_origin_denied(self):
@@ -193,27 +197,27 @@ class WSGIRejectionTests(unittest.TestCase):
 
     def test_bad_cookie_name_denied(self):
         m = manager()
-        token = m.mint("session-42")
-        env = wsgi_environ("POST", cookies="bad name=%s" % token, headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="bad name=%s" % cookie_token, headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(env)
 
     def test_header_and_form_mismatch_denied(self):
         m = manager()
-        token = m.mint("session-42")
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-CSRF-Token": token}, body="csrf_token=other".encode())
+        cookie_token, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token}, body="csrf_token=other".encode())
         self.assert_denied(env)
 
     def test_oversized_form_denied(self):
         m = manager()
-        token = m.mint("session-42")
+        cookie_token, transport_token = m.issue_pair("session-42")
         body = b"csrf_token=" + b"x" * (1 << 21)
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-CSRF-Token": token}, body=body)
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token}, body=body)
         self.assert_denied(env)
 
     def test_form_extraction_disabled_denied(self):
         m = manager()
-        token = m.mint("session-42")
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN}, body=("csrf_token=" + quote(token)).encode())
+        cookie_token, transport_token = m.issue_pair("session-42")
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN}, body=("csrf_token=" + quote(transport_token)).encode())
         self.assert_denied(env, allow_form=False)
 
     def test_negative_content_length_denied(self):
@@ -243,10 +247,10 @@ class WSGIKeyRotationTests(unittest.TestCase):
     def test_fallback_signed_token_accepted(self):
         m = manager(secrets=[SECRET, b"f" * 24])
         legacy = manager(secrets=b"f" * 24)
-        token = legacy.mint("session-42")
+        cookie_token, transport_token = legacy.issue_pair("session-42")
         start = StartResponse()
         mw = PyCSRFShieldWSGI(app, m, expected_origin=ORIGIN, session_id="session-42", allow_missing_referer=True)
-        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        env = wsgi_environ("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         collect(mw, env, start)
         self.assertEqual(start.status, "200 OK")
 

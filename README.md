@@ -14,7 +14,7 @@ and ASGI middleware.
 - Exact Origin and Referer matching plus `Sec-Fetch-Site` validation
 - Hardened `__Host-` cookies with `Secure`, `HttpOnly` and `SameSite=Lax`
 - WSGI and ASGI 3.0 middleware with bounded form parsing
-- 348 offline tests, all passing
+- 370 offline tests, all passing
 
 ## Install
 
@@ -30,9 +30,10 @@ The middleware uses two wire forms of one signed token:
 2. the masked transport token, rendered into HTML or returned to the client and
    echoed in `X-CSRF-Token` or a URL-encoded form field
 
-The server canonicalizes both forms, verifies the HMAC signature, expiry,
-purpose and session binding, then compares the canonical values with
-`hmac.compare_digest`.
+Each location accepts only its documented wire form: the unmasked token in the
+cookie and the masked token in transport fields when masking is enabled. The
+server verifies the HMAC signature, expiry, purpose and session binding, then
+compares the canonical values with `hmac.compare_digest`.
 
 A token is bound to the session identifier supplied by the application. This
 must be stable for one client and must differ between clients. A user id is
@@ -43,7 +44,10 @@ but is not a safe production substitute because it does not separate clients.
 Cookies are host-only `__Host-` cookies by default. They require HTTPS, cannot
 be set with a Domain attribute and use `Path=/`. Unsafe requests are rejected
 if a duplicate cookie of the same name appears, including a cookie tossed by a
-sibling subdomain.
+sibling subdomain. The middleware owns the response header for its cookie name
+and replaces downstream attempts to set it. It also forces a single
+`Cache-Control: no-store` response header so a masked transport token cannot
+be cached by accident.
 
 ## Quick start
 

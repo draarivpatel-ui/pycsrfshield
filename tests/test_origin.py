@@ -313,6 +313,14 @@ class FetchMetadataTests(unittest.TestCase):
         with self.assertRaises(OriginError):
             self.v.validate_fetch_metadata({"sec-fetch-site": "CROSS-SITE"})
 
+    def test_uppercase_same_origin_rejected_as_noncanonical(self):
+        with self.assertRaises(OriginError):
+            self.v.validate_fetch_metadata({"Sec-Fetch-Site": "SAME-ORIGIN"})
+
+    def test_mixed_case_none_rejected_as_noncanonical(self):
+        with self.assertRaises(OriginError):
+            self.v.validate_fetch_metadata({"Sec-Fetch-Site": "None"})
+
     def test_same_site_can_be_rejected(self):
         v = OriginValidator(EXPECTED, allow_same_site_fetch=False)
         with self.assertRaises(OriginError):
@@ -362,6 +370,14 @@ class CombinedValidationTests(unittest.TestCase):
     def test_cross_site_fetch_rejected_even_with_matching_origin(self):
         with self.assertRaises(OriginError):
             self.v.validate("POST", {"Origin": EXPECTED, "Sec-Fetch-Site": "cross-site"})
+
+    def test_duplicate_origin_keys_rejected(self):
+        with self.assertRaises(OriginError):
+            self.v.validate("POST", {"origin": "https://evil.com", "Origin": EXPECTED})
+
+    def test_duplicate_referer_keys_rejected(self):
+        with self.assertRaises(OriginError):
+            self.v.validate("POST", {"Origin": EXPECTED, "referer": "https://evil.com/x", "Referer": EXPECTED + "/x"})
 
     def test_invalid_method_rejected(self):
         with self.assertRaises(OriginError):

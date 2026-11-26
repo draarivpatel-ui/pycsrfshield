@@ -185,6 +185,8 @@ class TokenManager:
         value = time.time() if now is None else now
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TokenError("invalid clock value")
+        if value < 0:
+            raise TokenError("invalid clock value")
         try:
             return int(value)
         except (OverflowError, ValueError) as exc:

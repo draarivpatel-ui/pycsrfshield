@@ -208,7 +208,7 @@ class OriginValidator:
                 if present:
                     raise OriginError("ambiguous Sec-Fetch-Site header")
                 present = True
-                site = str(value).strip().lower()
+                site = str(value).strip()
         if not present:
             return
         if not site:
@@ -223,6 +223,10 @@ class OriginValidator:
     def validate(self, method: str, headers: Mapping[str, str]) -> None:
         """Validate every available origin signal for one request."""
         normalized_method = normalize_method(method)
+        for security_header in ("origin", "referer"):
+            matches = [key for key in headers if str(key).lower() == security_header]
+            if len(matches) > 1:
+                raise OriginError("ambiguous %s header" % security_header.capitalize())
         lowered = {str(k).lower(): v for k, v in headers.items()}
         self.validate_fetch_metadata(headers)
         if normalized_method in _SAFE_METHODS:

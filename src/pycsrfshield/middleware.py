@@ -44,6 +44,14 @@ def _single_header(headers: HeadersMulti, name: str) -> Optional[str]:
     return values[0] if values else None
 
 
+def _set_cookie_name(value: str) -> str:
+    return value.split(";", 1)[0].split("=", 1)[0].strip()
+
+
+def _set_cookie_name_bytes(value: bytes) -> bytes:
+    return value.split(b";", 1)[0].split(b"=", 1)[0].strip()
+
+
 def _headers_from_wsgi(environ: Mapping[str, Any]) -> HeadersMulti:
     headers: HeadersMulti = {}
     if environ.get("CONTENT_TYPE") is not None:
@@ -120,7 +128,10 @@ def _extract_token(
     header_present = header_token is not None
     form_present = form_token is not None
     if header_present and form_present:
-        if not hmac.compare_digest(header_token or "", form_token or ""):
+        if not hmac.compare_digest(
+            (header_token or "").encode("utf-8"),
+            (form_token or "").encode("utf-8"),
+        ):
             raise CSRFError("CSRF token mismatch")
         return header_token or ""
     if header_present:
@@ -204,23 +215,32 @@ class _ShieldCore:
             raise TokenError("invalid session identifier")
         return value
 
-    def _normalize_token(self, value: str, session_id: str) -> str:
-        """Return the canonical unmasked token, accepting either wire form."""
+    def _normalize_cookie_token(self, value: str, session_id: str) -> str:
+        """Return the canonical cookie token after strict verification."""
         if not isinstance(value, str) or not value:
             raise TokenError("invalid token")
         try:
             self.tokens.verify(value, session_id)
-            return value
-        except TokenError:
-            pass
+        except TokenError as exc:
+            raise TokenError("CSRF token is invalid") from exc
+        return value
+
+    def _normalize_transport_token(self, value: str, session_id: str) -> str:
+        """Return the canonical token for the configured transport wire form."""
+        if not isinstance(value, str) or not value:
+            raise TokenError("invalid token")
         if self.mask_tokens:
             try:
                 unmasked = self.tokens.unmask(value)
                 self.tokens.verify(unmasked, session_id)
                 return unmasked
-            except (MaskError, TokenError):
-                pass
-        raise TokenError("CSRF token is invalid")
+            except (MaskError, TokenError) as exc:
+                raise TokenError("CSRF token is invalid") from exc
+        try:
+            self.tokens.verify(value, session_id)
+        except TokenError as exc:
+            raise TokenError("CSRF token is invalid") from exc
+        return value
 
     def _prepared(self, cookie_token: str, session_id: str) -> _PreparedRequest:
         return _PreparedRequest(
@@ -256,7 +276,7 @@ class _ShieldCore:
             try:
                 cookie_value = self._cookie_value(headers)
                 if cookie_value is not None:
-                    canonical = self._normalize_token(cookie_value, session_id)
+                    canonical = self._normalize_cookie_token(cookie_value, session_id)
             except (CookieError, TokenError, MaskError):
                 canonical = None
             if canonical is None:
@@ -266,14 +286,14 @@ class _ShieldCore:
         cookie_value = self._cookie_value(headers)
         if cookie_value is None:
             raise CookieError("CSRF cookie is missing or duplicated")
-        cookie_token = self._normalize_token(cookie_value, session_id)
+        cookie_token = self._normalize_cookie_token(cookie_value, session_id)
         supplied = _extract_token(
             headers,
             body,
             header_name=self.header_name,
             allow_form=self.allow_form,
         )
-        supplied_token = self._normalize_token(supplied, session_id)
+        supplied_token = self._normalize_transport_token(supplied, session_id)
         if not hmac.compare_digest(cookie_token, supplied_token):
             raise TokenError("CSRF double-submit mismatch")
         return self._prepared(cookie_token, session_id)
@@ -403,7 +423,7 @@ class PyCSRFShieldWSGI:
                 body = self._read_form_body(environ)
                 consumed = True
             prepared = self.core.prepare(method, headers, body, environ)
-        except (CSRFError, ValueError, TypeError) as exc:
+        except CSRFError as exc:
             return self._deny(_reason_for(exc), start_response)
 
         if consumed:
@@ -412,7 +432,15 @@ class PyCSRFShieldWSGI:
         environ["pycsrfshield.session"] = prepared.session_id
 
         def hardened_start(status: str, response_headers: List[Tuple[str, str]], exc_info: Any = None) -> Any:
-            hardened = list(response_headers)
+            hardened = [
+                (name, value)
+                for name, value in response_headers
+                if name.lower() != "cache-control"
+                and not (
+                    name.lower() == "set-cookie"
+                    and _set_cookie_name(value) == self.core.cookie_name
+                )
+            ]
             hardened.append(("Set-Cookie", prepared.set_cookie))
             hardened.append(("Cache-Control", "no-store"))
             return start_response(status, hardened, exc_info)
@@ -516,7 +544,7 @@ class PyCSRFShieldASGI:
                 body, events = await self._read_form_body(receive)
                 consumed = True
             prepared = self.core.prepare(method, headers, body, scope)
-        except (CSRFError, ValueError, TypeError) as exc:
+        except CSRFError as exc:
             reason = _reason_for(exc)
             payload = json.dumps({"detail": _REASONS.get(reason, "CSRF verification failed")}).encode("utf-8")
             await send({
@@ -558,7 +586,16 @@ class PyCSRFShieldASGI:
         async def hardened_send(message: Dict[str, Any]) -> None:
             if message.get("type") == "http.response.start":
                 hardened = dict(message)
-                headers_list = list(message.get("headers", []))
+                cookie_name = self.core.cookie_name.encode("ascii")
+                headers_list = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"cache-control"
+                    and not (
+                        name.lower() == b"set-cookie"
+                        and _set_cookie_name_bytes(value) == cookie_name
+                    )
+                ]
                 headers_list.append((b"set-cookie", prepared.set_cookie.encode("latin-1")))
                 headers_list.append((b"cache-control", b"no-store"))
                 hardened["headers"] = headers_list

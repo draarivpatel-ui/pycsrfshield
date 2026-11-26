@@ -65,8 +65,8 @@ class ParseHeaderTests(unittest.TestCase):
     def test_whitespace_trimmed(self):
         self.assertEqual(parse_cookie_header(" a = 1 ; b = 2 "), {"a": ["1"], "b": ["2"]})
 
-    def test_quoted_value_unwrapped(self):
-        self.assertEqual(parse_cookie_header('a="hello"'), {"a": ["hello"]})
+    def test_quoted_value_preserved_as_wire_value(self):
+        self.assertEqual(parse_cookie_header('a="hello"'), {"a": ['"hello"']})
 
     def test_quoted_semicolon_rejected(self):
         with self.assertRaises(CookieError):
@@ -193,6 +193,26 @@ class FormatCookieTests(unittest.TestCase):
     def test_host_prefix_domain_rejected(self):
         with self.assertRaises(CookieError):
             format_cookie(NAME, "abc", domain="example.com")
+
+    def test_secure_prefix_requires_secure(self):
+        with self.assertRaises(CookieError):
+            format_cookie("__Secure-csrf", "abc", secure=False)
+
+    def test_secure_prefix_case_variants_require_secure(self):
+        for name in ("__secure-csrf", "__SECURE-csrf", "__SeCuRe-csrf"):
+            with self.subTest(name=name):
+                with self.assertRaises(CookieError):
+                    format_cookie(name, "abc", secure=False)
+
+    def test_host_prefix_case_variants_enforce_invariants(self):
+        for name in ("__host-csrf", "__HOST-csrf", "__HoSt-csrf"):
+            with self.subTest(name=name):
+                with self.assertRaises(CookieError):
+                    format_cookie(name, "abc", path="/app")
+                with self.assertRaises(CookieError):
+                    format_cookie(name, "abc", domain="example.com")
+                with self.assertRaises(CookieError):
+                    format_cookie(name, "abc", secure=False)
 
     def test_non_host_prefix_domain_allowed(self):
         cookie = format_cookie("csrf", "abc", domain="example.com")

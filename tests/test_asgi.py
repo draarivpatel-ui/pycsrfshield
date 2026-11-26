@@ -31,12 +31,12 @@ def shield(app=None, **kwargs):
     return PyCSRFShieldASGI(app or ASGIApp(), manager(), **opts)
 
 
-def good_scope(m=None, token=None, **headers):
+def good_scope(m=None, pair=None, **headers):
     m = m or manager()
-    token = token or m.mint("session-42")
+    cookie_token, transport_token = pair or m.issue_pair("session-42")
     all_headers = {"Origin": ORIGIN}
     all_headers.update(headers)
-    return asgi_scope("POST", cookies="%s=%s" % (COOKIE, token), headers=all_headers), token
+    return asgi_scope("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers=all_headers), transport_token
 
 
 class ASGIHappyPathTests(unittest.TestCase):
@@ -104,20 +104,20 @@ class ASGIHappyPathTests(unittest.TestCase):
                 self.assertEqual(sent[0]["status"], 200)
 
     def test_header_token_accepted(self):
-        token = manager().mint("session-42")
-        scope, token = good_scope(token=token, **{"X-CSRF-Token": token})
+        pair = manager().issue_pair("session-42")
+        scope, token = good_scope(pair=pair, **{"X-CSRF-Token": pair[1]})
         sent = run(drive(scope, shield()))
         self.assertEqual(sent[0]["status"], 200)
 
     def test_lowercase_header_key_accepted(self):
-        token = manager().mint("session-42")
-        scope, token = good_scope(token=token, **{"x-csrf-token": token})
+        pair = manager().issue_pair("session-42")
+        scope, token = good_scope(pair=pair, **{"x-csrf-token": pair[1]})
         sent = run(drive(scope, shield()))
         self.assertEqual(sent[0]["status"], 200)
 
     def test_custom_header_name(self):
-        token = manager().mint("session-42")
-        scope, token = good_scope(token=token, **{"X-Token": token})
+        pair = manager().issue_pair("session-42")
+        scope, token = good_scope(pair=pair, **{"X-Token": pair[1]})
         mw = PyCSRFShieldASGI(ASGIApp(), manager(), expected_origin=ORIGIN, session_id="session-42", header_name="X-Token", allow_missing_referer=True)
         sent = run(drive(scope, mw))
         self.assertEqual(sent[0]["status"], 200)
@@ -151,7 +151,7 @@ class ASGIRejectionTests(unittest.TestCase):
 
     def test_missing_token_denied(self):
         m = manager()
-        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, m.mint("session-42")), headers={"Origin": ORIGIN})
+        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, m.issue("session-42")), headers={"Origin": ORIGIN})
         data = self.assert_denied(scope)
         self.assertIn("detail", data)
 
@@ -163,15 +163,15 @@ class ASGIRejectionTests(unittest.TestCase):
 
     def test_duplicate_cookie_denied(self):
         m = manager()
-        token = m.mint("session-42")
-        scope = asgi_scope("POST", cookies="%s=%s; %s=tossed" % (COOKIE, token, COOKIE), headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = m.issue_pair("session-42")
+        scope = asgi_scope("POST", cookies="%s=%s; %s=tossed" % (COOKIE, cookie_token, COOKIE), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(scope)
 
     def test_mismatched_token_denied(self):
         m = manager()
-        a = m.mint("session-42")
-        b = m.mint("session-42")
-        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, a), headers={"Origin": ORIGIN, "X-CSRF-Token": b})
+        cookie_token, _ = m.issue_pair("session-42")
+        _, transport_token = m.issue_pair("session-42")
+        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(scope)
 
     def test_cross_site_origin_denied(self):
@@ -187,8 +187,8 @@ class ASGIRejectionTests(unittest.TestCase):
         self.assert_denied(scope, ("X-CSRF-Token=" + quote(token)).encode())
 
     def test_header_and_form_mismatch_denied(self):
-        token = manager().mint("session-42")
-        scope, token = good_scope(token=token, **{"X-CSRF-Token": token})
+        pair = manager().issue_pair("session-42")
+        scope, token = good_scope(pair=pair, **{"X-CSRF-Token": pair[1]})
         self.assert_denied(scope, b"csrf_token=other")
 
     def test_forged_token_denied(self):
@@ -197,14 +197,14 @@ class ASGIRejectionTests(unittest.TestCase):
 
     def test_wrong_session_denied(self):
         m = manager()
-        token = m.mint("other")
-        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = m.issue_pair("other")
+        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(scope)
 
     def test_expired_token_denied(self):
         m = manager(ttl=10, clock_skew=0)
-        token = m.mint("session-42", now=1000)
-        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = m.issue_pair("session-42", now=1000)
+        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         self.assert_denied(scope)
 
     def test_oversized_form_denied(self):
@@ -212,8 +212,8 @@ class ASGIRejectionTests(unittest.TestCase):
         self.assert_denied(scope, b"csrf_token=" + b"x" * (1 << 21))
 
     def test_ambiguous_header_denied(self):
-        token = manager().mint("session-42")
-        scope, token = good_scope(token=token, **{"X-CSRF-Token": token})
+        pair = manager().issue_pair("session-42")
+        scope, token = good_scope(pair=pair, **{"X-CSRF-Token": pair[1]})
         scope["headers"].append([b"x-csrf-token", b"other"])
         self.assert_denied(scope)
 
@@ -225,8 +225,8 @@ class ASGIRejectionTests(unittest.TestCase):
     def test_fallback_key_accepted(self):
         m = manager(secrets=[SECRET, b"f" * 24])
         legacy = manager(secrets=b"f" * 24)
-        token = legacy.mint("session-42")
-        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, token), headers={"Origin": ORIGIN, "X-CSRF-Token": token})
+        cookie_token, transport_token = legacy.issue_pair("session-42")
+        scope = asgi_scope("POST", cookies="%s=%s" % (COOKIE, cookie_token), headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token})
         mw = PyCSRFShieldASGI(ASGIApp(), m, expected_origin=ORIGIN, session_id="session-42", allow_missing_referer=True)
         sent = run(drive(scope, mw))
         self.assertEqual(sent[0]["status"], 200)

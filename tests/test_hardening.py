@@ -348,6 +348,174 @@ class ASGIStandardFlowTests(unittest.TestCase):
         self.assertEqual(emitted, cookie_token)
 
 
+class WireFormHardeningTests(unittest.TestCase):
+    def test_masked_transport_token_rejected_as_wsgi_cookie(self):
+        m = manager()
+        cookie_token, transport_token = m.issue_pair(SESSION)
+        env = wsgi_environ(
+            "POST",
+            cookies="%s=%s" % (COOKIE, transport_token),
+            headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token},
+        )
+        start = StartResponse()
+        collect(wsgi_shield(), env, start)
+        self.assertEqual(start.status, "403 Forbidden")
+
+    def test_unmasked_cookie_token_rejected_as_wsgi_transport(self):
+        m = manager()
+        cookie_token, transport_token = m.issue_pair(SESSION)
+        env = wsgi_environ(
+            "POST",
+            cookies="%s=%s" % (COOKIE, cookie_token),
+            headers={"Origin": ORIGIN, "X-CSRF-Token": cookie_token},
+        )
+        start = StartResponse()
+        collect(wsgi_shield(), env, start)
+        self.assertEqual(start.status, "403 Forbidden")
+
+    def test_masked_transport_token_rejected_as_asgi_cookie(self):
+        m = manager()
+        cookie_token, transport_token = m.issue_pair(SESSION)
+        scope = asgi_scope(
+            "POST",
+            cookies="%s=%s" % (COOKIE, transport_token),
+            headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token},
+        )
+        sent = run(drive(scope, PyCSRFShieldASGI(ASGIApp(), manager(), expected_origin=ORIGIN, session_id=SESSION, allow_missing_referer=True)))
+        self.assertEqual(sent[0]["status"], 403)
+
+    def test_quoted_cookie_wire_value_is_not_unquoted_for_verification(self):
+        m = manager()
+        cookie_token, transport_token = m.issue_pair(SESSION)
+        env = wsgi_environ(
+            "POST",
+            cookies='%s="%s"' % (COOKIE, cookie_token),
+            headers={"Origin": ORIGIN, "X-CSRF-Token": transport_token},
+        )
+        start = StartResponse()
+        collect(wsgi_shield(), env, start)
+        self.assertEqual(start.status, "403 Forbidden")
+
+    def test_nonascii_header_and_form_tokens_fail_closed(self):
+        m = manager()
+        cookie_token, _ = m.issue_pair(SESSION)
+        env = wsgi_environ(
+            "POST",
+            cookies="%s=%s" % (COOKIE, cookie_token),
+            headers={"Origin": ORIGIN, "X-CSRF-Token": "\xe9"},
+            body="csrf_token=\xe9".encode("utf-8"),
+        )
+        start = StartResponse()
+        collect(wsgi_shield(), env, start)
+        self.assertEqual(start.status, "403 Forbidden")
+
+    def test_asgi_latin1_header_and_utf8_form_tokens_fail_closed(self):
+        scope, cookie_token, transport_token = ASGIStandardFlowTests().valid_scope()
+        scope["headers"] = [
+            [name, b"\xe9" if name == b"x-csrf-token" else value]
+            for name, value in scope["headers"]
+        ]
+        body = "csrf_token=\xe9".encode("utf-8")
+        mw = PyCSRFShieldASGI(ASGIApp(), manager(), expected_origin=ORIGIN, session_id=SESSION, allow_missing_referer=True)
+        sent = run(drive(scope, mw, body))
+        self.assertEqual(sent[0]["status"], 403)
+
+
+class ResponseHardeningTests(unittest.TestCase):
+    def test_wsgi_cache_control_is_replaced_not_stacked(self):
+        def caching_app(environ, start_response):
+            start_response("200 OK", [("Cache-Control", "public, max-age=3600"), ("cache-control", "must-revalidate")])
+            return [b"ok"]
+
+        env, cookie_token, transport_token = valid_wsgi_request()
+        start = StartResponse()
+        collect(wsgi_shield(caching_app), env, start)
+        values = [value for name, value in start.headers if name.lower() == "cache-control"]
+        self.assertEqual(values, ["no-store"])
+
+    def test_asgi_cache_control_is_replaced_not_stacked(self):
+        async def caching_app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"cache-control", b"public, max-age=3600"), (b"cache-control", b"must-revalidate")]})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        scope, cookie_token, transport_token = ASGIStandardFlowTests().valid_scope()
+        mw = PyCSRFShieldASGI(caching_app, manager(), expected_origin=ORIGIN, session_id=SESSION, allow_missing_referer=True)
+        sent = run(drive(scope, mw))
+        values = [value for name, value in sent[0]["headers"] if name.lower() == b"cache-control"]
+        self.assertEqual(values, [b"no-store"])
+
+    def test_wsgi_downstream_cannot_clobber_shield_cookie(self):
+        def clobbering_app(environ, start_response):
+            start_response("200 OK", [
+                ("Set-Cookie", COOKIE + "=forged; Path=/"),
+                ("Set-Cookie", "other=kept; Path=/"),
+            ])
+            return [b"ok"]
+
+        env, cookie_token, transport_token = valid_wsgi_request()
+        start = StartResponse()
+        collect(wsgi_shield(clobbering_app), env, start)
+        values = [value for name, value in start.headers if name.lower() == "set-cookie"]
+        self.assertEqual(len(values), 2)
+        shield_values = [value for value in values if value.startswith(COOKIE + "=")]
+        self.assertEqual(len(shield_values), 1)
+        self.assertIn(cookie_token, shield_values[0])
+        self.assertNotIn("forged", shield_values[0])
+        self.assertIn("other=kept; Path=/", values)
+
+    def test_asgi_downstream_cannot_clobber_shield_cookie(self):
+        async def clobbering_app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": [
+                (b"set-cookie", (COOKIE + "=forged; Path=/").encode("ascii")),
+                (b"set-cookie", b"other=kept; Path=/"),
+            ]})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        scope, cookie_token, transport_token = ASGIStandardFlowTests().valid_scope()
+        mw = PyCSRFShieldASGI(clobbering_app, manager(), expected_origin=ORIGIN, session_id=SESSION, allow_missing_referer=True)
+        sent = run(drive(scope, mw))
+        values = [value.decode("latin-1") for name, value in sent[0]["headers"] if name.lower() == b"set-cookie"]
+        self.assertEqual(len(values), 2)
+        shield_values = [value for value in values if value.startswith(COOKIE + "=")]
+        self.assertEqual(len(shield_values), 1)
+        self.assertIn(cookie_token, shield_values[0])
+        self.assertNotIn("forged", shield_values[0])
+        self.assertIn("other=kept; Path=/", values)
+
+
+class ExceptionPropagationTests(unittest.TestCase):
+    def test_wsgi_session_callable_value_error_propagates(self):
+        def broken_session(environ):
+            raise ValueError("application session failure")
+
+        mw = wsgi_shield(session_id=broken_session)
+        with self.assertRaises(ValueError):
+            collect(mw, wsgi_environ("GET"), StartResponse())
+
+    def test_asgi_session_callable_value_error_propagates(self):
+        def broken_session(scope):
+            raise ValueError("application session failure")
+
+        mw = PyCSRFShieldASGI(ASGIApp(), manager(), expected_origin=ORIGIN, session_id=broken_session, allow_missing_referer=True)
+        with self.assertRaises(ValueError):
+            run(drive(asgi_scope("GET"), mw))
+
+    def test_wsgi_application_error_propagates(self):
+        def broken_app(environ, start_response):
+            raise RuntimeError("application failure")
+
+        with self.assertRaises(RuntimeError):
+            collect(wsgi_shield(broken_app), wsgi_environ("GET"), StartResponse())
+
+    def test_asgi_application_error_propagates(self):
+        async def broken_app(scope, receive, send):
+            raise RuntimeError("application failure")
+
+        mw = PyCSRFShieldASGI(broken_app, manager(), expected_origin=ORIGIN, session_id=SESSION, allow_missing_referer=True)
+        with self.assertRaises(RuntimeError):
+            run(drive(asgi_scope("GET"), mw))
+
+
 class ConfigurationHardeningTests(unittest.TestCase):
     def test_duplicate_fallback_keys_rejected(self):
         with self.assertRaises(ConfigurationError):
