@@ -32,6 +32,11 @@ dependencies = []
 [project.optional-dependencies]
 dev = []
 
+[project.urls]
+Homepage = "https://github.com/draarivpatel-ui/pycsrfshield"
+Repository = "https://github.com/draarivpatel-ui/pycsrfshield"
+Issues = "https://github.com/draarivpatel-ui/pycsrfshield/issues"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
