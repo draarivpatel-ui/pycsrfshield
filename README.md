@@ -1,5 +1,7 @@
 # pycsrfshield
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/draarivpatel-ui/pycsrfshield/badge)](https://scorecard.dev/viewer/?uri=github.com/draarivpatel-ui/pycsrfshield)
+
 Zero-dependency CSRF protection for Python web applications. It combines signed
 double-submit tokens, per-client session binding, strict origin checks,
 cookie-tossing defense, BREACH-safe token masking, and framework-agnostic WSGI
